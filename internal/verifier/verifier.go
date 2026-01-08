@@ -70,8 +70,10 @@
 //
 // # Progressive Verification Strategy
 //
-//	File Size < 1MB:  CHUNK[0] → done (single read covers whole file)
-//	File Size ≥ 1MB:  HEAD → TAIL → CHUNK[0] → [CHUNK[1]...] → done
+//	File Size < 1MB:      [0, fileSize) → done (single read)
+//	File Size 1MB-2MB:    [0, 1MB) → [fileSize-1MB, fileSize) → done (HEAD + TAIL cover it)
+//	File Size > 2MB:      HEAD → TAIL → CHUNK[0] → [CHUNK[1]...] → done
+//	                      Chunks cover [1MB, fileSize-1MB), avoiding overlap with probes
 //
 // # Why This Design?
 //
@@ -94,6 +96,7 @@ import (
 	"time"
 
 	"github.com/dustin/go-humanize"
+	"github.com/ivoronin/dupedog/internal/cache"
 	"github.com/ivoronin/dupedog/internal/progress"
 	"github.com/ivoronin/dupedog/internal/types"
 )
@@ -108,21 +111,16 @@ const (
 	blockSize = 64 * 1024
 )
 
-// stage represents the progression of verification ranges.
-type stage int
-
-const (
-	stageHead  stage = iota // Hash first probeSize bytes
-	stageTail               // Hash last probeSize bytes
-	stageChunk              // Hash chunk at specific offset
-)
+// fmtBytes is a shorthand for humanize.IBytes (human-readable byte sizes).
+var fmtBytes = humanize.IBytes
 
 // job represents a unit of verification work.
-// Contains sibling groups to verify at a specific stage.
+// Contains sibling groups to verify at a specific byte range.
 type job struct {
-	siblings types.CandidateGroup // Sibling groups being verified
-	stage    stage
-	offset   int64
+	siblings   types.CandidateGroup // Sibling groups being verified
+	start      int64                // Byte offset to read
+	size       int64                // Number of bytes to read
+	totalBytes int64                // Cumulative bytes read INCLUDING this job
 }
 
 // stats tracks verification progress.
@@ -130,6 +128,7 @@ type stats struct {
 	totalCandidateBytes uint64        // total bytes to verify (calculated upfront)
 	verifiedBytes       atomic.Uint64 // hashed data for output
 	skippedBytes        atomic.Uint64 // bytes avoided due to early elimination
+	cachedBytes         atomic.Uint64 // bytes retrieved from cache (skipped I/O)
 	confirmedCandidates atomic.Int64  // number of confirmed duplicates
 	confirmedBytes      atomic.Uint64 // bytes in confirmed duplicates
 	confirmedSets       atomic.Int64  // number of confirmed duplicate sets
@@ -140,20 +139,20 @@ func (s *stats) String() string {
 	elapsed := time.Since(s.startTime).Truncate(time.Millisecond)
 	verified := s.verifiedBytes.Load()
 	skipped := s.skippedBytes.Load()
-	total := verified + skipped
+	cached := s.cachedBytes.Load()
+	total := verified + skipped + cached
 	pct := 0.0
 	if s.totalCandidateBytes > 0 {
 		pct = float64(total) / float64(s.totalCandidateBytes) * 100
 	}
+	if cached > 0 {
+		return fmt.Sprintf("Verified %s + cached %s + skipped %s out of %s (%.0f%%), confirmed %d duplicates (%s) in %d sets in %v",
+			fmtBytes(verified), fmtBytes(cached), fmtBytes(skipped), fmtBytes(s.totalCandidateBytes),
+			pct, s.confirmedCandidates.Load(), fmtBytes(s.confirmedBytes.Load()), s.confirmedSets.Load(), elapsed)
+	}
 	return fmt.Sprintf("Verified %s + skipped %s out of %s (%.0f%%), confirmed %d duplicates (%s) in %d sets in %v",
-		humanize.IBytes(verified),
-		humanize.IBytes(skipped),
-		humanize.IBytes(s.totalCandidateBytes),
-		pct,
-		s.confirmedCandidates.Load(),
-		humanize.IBytes(s.confirmedBytes.Load()),
-		s.confirmedSets.Load(),
-		elapsed)
+		fmtBytes(verified), fmtBytes(skipped), fmtBytes(s.totalCandidateBytes),
+		pct, s.confirmedCandidates.Load(), fmtBytes(s.confirmedBytes.Load()), s.confirmedSets.Load(), elapsed)
 }
 
 // Verifier confirms duplicates among candidate groups using progressive hashing.
@@ -165,6 +164,7 @@ type Verifier struct {
 	workers      int                   // Max concurrent file reads
 	showProgress bool                  // Whether to display progress bar
 	errCh        chan error            // Non-fatal errors (permission denied, etc.)
+	cache        *cache.Cache      // Optional hash cache (nil = disabled)
 
 	// Runtime (initialized in Run)
 	jobCh     chan job                  // Jobs to process
@@ -177,12 +177,14 @@ type Verifier struct {
 }
 
 // New creates a Verifier for confirming duplicates among candidate groups.
-func New(groups types.CandidateGroups, workers int, showProgress bool, errCh chan error) *Verifier {
+// Use cache.Open("") for disabled cache; nil will panic.
+func New(groups types.CandidateGroups, workers int, showProgress bool, errCh chan error, hashCache *cache.Cache) *Verifier {
 	return &Verifier{
 		groups:       groups,
 		workers:      workers,
 		showProgress: showProgress,
 		errCh:        errCh,
+		cache:        hashCache,
 	}
 }
 
@@ -235,7 +237,8 @@ func (v *Verifier) Run() types.DuplicateGroups {
 	v.pending.Add(v.groups.Len())
 	go func() {
 		for _, candidateGroup := range v.groups.Items() {
-			v.jobCh <- job{siblings: candidateGroup, stage: initialStage(candidateGroup.First().First().Size)}
+			j, _ := nextJob(nil, candidateGroup)
+			v.jobCh <- j
 		}
 	}()
 
@@ -290,14 +293,32 @@ func (v *Verifier) verifyFilesInJob(j job) map[string][]types.SiblingGroup {
 
 			// Hash only the first file - all siblings are hardlinks with identical content
 			rep := sibs.First()
-			start, size := calcRange(j.stage, j.offset, rep.Size)
-			hash, bytesRead, err := hashRange(rep.Path, start, size)
+
+			// Try cache first
+			cachedHash, err := v.cache.Lookup(rep, j.start, j.size)
+			if err != nil {
+				v.sendError(fmt.Errorf("cache lookup %s: %w", rep.Path, err))
+				// Continue with hash computation on cache error
+			}
+			if cachedHash != nil {
+				v.stats.cachedBytes.Add(uint64(j.size))
+				v.bar.Describe(v.stats)
+				results <- hashResult{hex.EncodeToString(cachedHash), sibs}
+				return
+			}
+
+			// Cache miss - compute hash
+			hash, n, err := hashRange(rep.Path, j.start, j.size)
 			if err != nil {
 				v.sendError(fmt.Errorf("%s: %w", rep.Path, err))
 				return
 			}
 
-			v.stats.verifiedBytes.Add(bytesRead)
+			hashBytes, _ := hex.DecodeString(hash)
+			if err := v.cache.Store(rep, j.start, j.size, hashBytes); err != nil {
+				v.sendError(fmt.Errorf("cache store %s: %w", rep.Path, err))
+			}
+			v.stats.verifiedBytes.Add(uint64(n))
 			v.bar.Describe(v.stats)
 
 			results <- hashResult{hash, sibs}
@@ -318,7 +339,7 @@ func (v *Verifier) verifyFilesInJob(j job) map[string][]types.SiblingGroup {
 //
 // For each hash group with 2+ sibling groups:
 //   - If verification complete → send to results channel (confirmed duplicates)
-//   - If more stages needed → queue next job (pending.Add + queue send)
+//   - If more ranges needed → queue next job (pending.Add + queue send)
 func (v *Verifier) processJob(j job) {
 	defer v.pending.Done()
 
@@ -328,11 +349,11 @@ func (v *Verifier) processJob(j job) {
 		if candidateGroup.Len() < 2 {
 			// Eliminated early - track bytes we avoided reading
 			fileSize := candidateGroup.First().First().Size
-			v.stats.skippedBytes.Add(uint64(bytesNotRead(j.stage, j.offset, fileSize)))
+			v.stats.skippedBytes.Add(uint64(fileSize - j.totalBytes))
 			v.bar.Describe(v.stats)
 			continue
 		}
-		if next, done := nextJob(j, candidateGroup); done {
+		if next, done := nextJob(&j, candidateGroup); done {
 			v.resultsCh <- types.NewDuplicateGroup(candidateGroup.Items())
 		} else {
 			v.pending.Add(1)
@@ -341,69 +362,50 @@ func (v *Verifier) processJob(j job) {
 	}
 }
 
-// initialStage returns the starting verification stage for a given file size.
-func initialStage(fileSize int64) stage {
-	if fileSize < probeSize {
-		return stageChunk
-	}
-	return stageHead
-}
-
-// calcRange calculates the byte range (start, size) for a given verification stage.
+// nextJob returns the next verification job, or done=true if verification is complete.
 //
-// Returns the appropriate range based on stage type:
-//   - stageHead: first probeSize bytes
-//   - stageTail: last probeSize bytes
-//   - stageChunk: chunkSize bytes at given offset
-func calcRange(s stage, offset, fileSize int64) (start, size int64) {
-	switch s {
-	case stageHead:
-		return 0, min(probeSize, fileSize)
-	case stageTail:
-		tailStart := max(0, fileSize-probeSize)
-		return tailStart, fileSize - tailStart
-	default: // stageChunk
-		chunkEnd := min(offset+chunkSize, fileSize)
-		return offset, chunkEnd - offset
-	}
-}
-
-// nextJob returns the next verification stage, or done=true if verification is complete.
+// RULE: Never read the same byte twice.
 //
-// Stage progression: HEAD → TAIL → CHUNK[0] → CHUNK[1] → ... → done
-func nextJob(parent job, candidateGroup types.CandidateGroup) (next job, done bool) {
+// State machine (linear flow, early exits):
+//
+//	INITIAL     → emit HEAD [0, min(probeSize, fileSize))
+//	DONE        → totalBytes == fileSize (handles ALL completion cases)
+//	AFTER_HEAD  → medium: emit [probeSize, fileSize), large: emit TAIL
+//	IN_CHUNKS   → emit next chunk in [probeSize, tailStart)
+func nextJob(prev *job, candidateGroup types.CandidateGroup) (next job, done bool) {
 	fileSize := candidateGroup.First().First().Size
 
-	switch parent.stage {
-	case stageHead:
-		return job{siblings: candidateGroup, stage: stageTail}, false
-	case stageTail:
-		return job{siblings: candidateGroup, stage: stageChunk, offset: 0}, false
-	case stageChunk:
-		nextOffset := parent.offset + chunkSize
-		if nextOffset >= fileSize {
-			return job{}, true // All chunks matched - confirmed duplicates
-		}
-		return job{siblings: candidateGroup, stage: stageChunk, offset: nextOffset}, false
+	// ─────────────────────────────────────────────────
+	// INITIAL → emit HEAD (or entire file if small)
+	// ─────────────────────────────────────────────────
+	if prev == nil {
+		size := min(probeSize, fileSize)
+		return job{siblings: candidateGroup, start: 0, size: size, totalBytes: size}, false
 	}
-	return job{}, true
-}
 
-// bytesNotRead returns the amount of file data we avoided reading
-// when eliminating a candidate at the given stage.
-func bytesNotRead(s stage, offset, fileSize int64) int64 {
-	if fileSize < probeSize {
-		return 0 // Small files fully read in one go
+	// ─────────────────────────────────────────────────
+	// DONE → file fully verified
+	// ─────────────────────────────────────────────────
+	if prev.totalBytes == fileSize {
+		return job{}, true
 	}
-	switch s {
-	case stageHead:
-		return fileSize - probeSize
-	case stageTail:
-		return fileSize - 2*probeSize
-	case stageChunk:
-		return fileSize - (2*probeSize + min(offset+chunkSize, fileSize))
+
+	// ─────────────────────────────────────────────────
+	// AFTER_HEAD → emit remaining (medium) or TAIL (large)
+	// ─────────────────────────────────────────────────
+	if prev.totalBytes == probeSize {
+		remaining := fileSize - probeSize
+		size := min(probeSize, remaining)
+		start := max(probeSize, remaining)
+		return job{siblings: candidateGroup, start: start, size: size, totalBytes: probeSize + size}, false
 	}
-	return 0
+
+	// ─────────────────────────────────────────────────
+	// IN_CHUNKS → emit next chunk in [probeSize, tailStart)
+	// ─────────────────────────────────────────────────
+	start := prev.totalBytes - probeSize
+	size := min(chunkSize, fileSize-prev.totalBytes)
+	return job{siblings: candidateGroup, start: start, size: size, totalBytes: prev.totalBytes + size}, false
 }
 
 // sendError sends an error to the errors channel if it's not nil.
@@ -417,7 +419,7 @@ func (v *Verifier) sendError(err error) {
 //
 // Returns the SHA-256 hash (hex-encoded), bytes actually read, and any error.
 // Uses blockSize buffer for efficient I/O.
-func hashRange(path string, start, size int64) (hash string, bytesRead uint64, err error) {
+func hashRange(path string, start, size int64) (hash string, n int64, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", 0, err
@@ -430,10 +432,10 @@ func hashRange(path string, start, size int64) (hash string, bytesRead uint64, e
 
 	hasher := sha256.New()
 	buf := make([]byte, blockSize)
-	n, err := io.CopyBuffer(hasher, io.LimitReader(f, size), buf)
+	n, err = io.CopyBuffer(hasher, io.LimitReader(f, size), buf)
 	if err != nil {
-		return "", uint64(n), err
+		return "", n, err
 	}
 
-	return hex.EncodeToString(hasher.Sum(nil)), uint64(n), nil
+	return hex.EncodeToString(hasher.Sum(nil)), n, nil
 }

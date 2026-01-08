@@ -6,6 +6,7 @@ import (
 	"runtime"
 
 	"github.com/ivoronin/dupedog/internal/deduper"
+	"github.com/ivoronin/dupedog/internal/cache"
 	"github.com/ivoronin/dupedog/internal/scanner"
 	"github.com/ivoronin/dupedog/internal/screener"
 	"github.com/ivoronin/dupedog/internal/verifier"
@@ -22,6 +23,7 @@ type dedupeOptions struct {
 	dryRun                bool
 	symlinkFallback       bool
 	trustDeviceBoundaries bool
+	cacheFile             string
 }
 
 
@@ -59,6 +61,7 @@ Use --dry-run to preview without making changes.`,
 	cmd.Flags().BoolVar(&opts.symlinkFallback, "symlink-fallback", false, "Fall back to symlinks when deduplicating files across device boundaries")
 	cmd.Flags().BoolVar(&opts.trustDeviceBoundaries, "trust-device-boundaries", false,
 		"Assume devices have independent inode spaces. WARNING: Unsafe if the same filesystem is mounted at multiple paths (e.g., NFS)")
+	cmd.Flags().StringVar(&opts.cacheFile, "cache-file", "", "Path to hash cache file (enables caching)")
 
 	return cmd
 }
@@ -102,8 +105,14 @@ func runDedupe(paths []string, opts *dedupeOptions) error {
 		return nil
 	}
 
-	// Phase 3: Verify duplicates
-	duplicates := verifier.New(candidates, opts.workers, showProgress, errors).Run()
+	// Phase 3: Open cache (if enabled) and verify duplicates
+	hashCache, err := cache.Open(opts.cacheFile)
+	if err != nil {
+		return fmt.Errorf("open cache: %w", err)
+	}
+	defer func() { _ = hashCache.Close() }()
+
+	duplicates := verifier.New(candidates, opts.workers, showProgress, errors, hashCache).Run()
 
 	// Phase 4: Execute deduplication (paths define source priority)
 	deduper.New(duplicates, paths, opts.dryRun, opts.symlinkFallback, opts.verbose, showProgress, errors).Run()

@@ -9,12 +9,16 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/ivoronin/dupedog/internal/cache"
 	"github.com/ivoronin/dupedog/internal/deduper"
 	"github.com/ivoronin/dupedog/internal/scanner"
 	"github.com/ivoronin/dupedog/internal/screener"
 	"github.com/ivoronin/dupedog/internal/testfs"
 	"github.com/ivoronin/dupedog/internal/verifier"
 )
+
+// noCache is a disabled cache for tests (cache.Open("") returns no-op cache).
+var noCache, _ = cache.Open("")
 
 // =============================================================================
 // Section 8.1: Full Pipeline Integration Tests
@@ -266,7 +270,7 @@ func TestFullPipelineEmptyScenarios(t *testing.T) {
 			sc := screener.New(files, false, false)
 			candidates := sc.Run()
 
-			v := verifier.New(candidates, 2, false, nil)
+			v := verifier.New(candidates, 2, false, nil, noCache)
 			duplicates := v.Run()
 
 			// No duplicates expected in these scenarios
@@ -534,7 +538,7 @@ func runPipeline(t *testing.T, root string, exclude []string, minSize int64, dry
 	candidates := sc.Run()
 
 	// Verifier
-	v := verifier.New(candidates, 2, false, nil)
+	v := verifier.New(candidates, 2, false, nil, noCache)
 	duplicates := v.Run()
 
 	// Deduper

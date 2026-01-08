@@ -20,6 +20,7 @@ $ dupedog dedupe --dry-run /data/ --exclude .git --min-size 1g --verbose
 
 - **Parallel scanning** - concurrent directory traversal with configurable worker pool
 - **Progressive verification** - eliminates non-duplicates early using staged hashing
+- **Hash caching** - optional persistent cache skips re-hashing unchanged files across runs
 - **Atomic operations** - hardlink creation via temp file + rename pattern
 - **Cross-device support** - optional symlink fallback when hardlinks aren't possible
 
@@ -70,6 +71,9 @@ dupedog dedupe --symlink-fallback /volume1 /volume2
 
 # Path priority: duplicates found in later paths are replaced with links to earlier paths
 dupedog dedupe --symlink-fallback /mnt/important /mnt/archive /mnt/copies
+
+# Enable hash caching for faster repeated runs
+dupedog dedupe --cache-file ~/.cache/dupedog_volume1.db /volume1
 ```
 
 ### Flags
@@ -82,6 +86,7 @@ dupedog dedupe --symlink-fallback /mnt/important /mnt/archive /mnt/copies
 | `--dry-run` | `-n` | `false` | Preview changes without executing |
 | `--verbose` | `-v` | `false` | Log individual file operations |
 | `--no-progress` | - | `false` | Disable progress bar |
+| `--cache-file` | - | - | Path to hash cache file (enables caching) |
 | `--symlink-fallback` | - | `false` | Use symlinks for cross-device deduplication |
 | `--trust-device-boundaries` | - | `false` | Assume devices have independent inode spaces (unsafe with NFS) |
 
@@ -107,6 +112,20 @@ The verification phase uses a staged hashing strategy to minimize I/O. Instead o
 3. **CHUNKS** - sequential 1 GB blocks (only if HEAD+TAIL match)
 
 Files are eliminated as soon as their hash diverges from the group. In practice, most non-duplicates are eliminated after just 2 MB of I/O, because files that differ typically differ at the beginning or end.
+
+### Hash Caching
+
+With `--cache-file`, dupedog remembers file hashes between runs. Unchanged files are verified instantly from cache — no disk I/O needed.
+
+```
+# First run: 1h13m (all files hashed)
+✔ Verified 8.0 TiB + skipped 5.1 TiB out of 13 TiB (100%)
+
+# Second run: 2m (most files cached)
+✔ Verified 50 GiB + cached 7.95 TiB + skipped 5.1 TiB out of 13 TiB (100%)
+```
+
+Modified files are automatically re-hashed. Use separate cache files for different scan targets (each run keeps only entries it used).
 
 ### Device Boundaries and Inode Grouping
 
