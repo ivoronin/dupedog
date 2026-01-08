@@ -94,6 +94,7 @@ import (
 	"time"
 
 	"github.com/dustin/go-humanize"
+	"github.com/ivoronin/dupedog/internal/cache"
 	"github.com/ivoronin/dupedog/internal/progress"
 	"github.com/ivoronin/dupedog/internal/types"
 )
@@ -107,6 +108,9 @@ const (
 	// blockSize is the read buffer size (64KB)
 	blockSize = 64 * 1024
 )
+
+// fmtBytes is a shorthand for humanize.IBytes (human-readable byte sizes).
+var fmtBytes = humanize.IBytes
 
 // stage represents the progression of verification ranges.
 type stage int
@@ -130,6 +134,7 @@ type stats struct {
 	totalCandidateBytes uint64        // total bytes to verify (calculated upfront)
 	verifiedBytes       atomic.Uint64 // hashed data for output
 	skippedBytes        atomic.Uint64 // bytes avoided due to early elimination
+	cachedBytes         atomic.Uint64 // bytes retrieved from cache (skipped I/O)
 	confirmedCandidates atomic.Int64  // number of confirmed duplicates
 	confirmedBytes      atomic.Uint64 // bytes in confirmed duplicates
 	confirmedSets       atomic.Int64  // number of confirmed duplicate sets
@@ -140,20 +145,20 @@ func (s *stats) String() string {
 	elapsed := time.Since(s.startTime).Truncate(time.Millisecond)
 	verified := s.verifiedBytes.Load()
 	skipped := s.skippedBytes.Load()
-	total := verified + skipped
+	cached := s.cachedBytes.Load()
+	total := verified + skipped + cached
 	pct := 0.0
 	if s.totalCandidateBytes > 0 {
 		pct = float64(total) / float64(s.totalCandidateBytes) * 100
 	}
+	if cached > 0 {
+		return fmt.Sprintf("Verified %s + cached %s + skipped %s out of %s (%.0f%%), confirmed %d duplicates (%s) in %d sets in %v",
+			fmtBytes(verified), fmtBytes(cached), fmtBytes(skipped), fmtBytes(s.totalCandidateBytes),
+			pct, s.confirmedCandidates.Load(), fmtBytes(s.confirmedBytes.Load()), s.confirmedSets.Load(), elapsed)
+	}
 	return fmt.Sprintf("Verified %s + skipped %s out of %s (%.0f%%), confirmed %d duplicates (%s) in %d sets in %v",
-		humanize.IBytes(verified),
-		humanize.IBytes(skipped),
-		humanize.IBytes(s.totalCandidateBytes),
-		pct,
-		s.confirmedCandidates.Load(),
-		humanize.IBytes(s.confirmedBytes.Load()),
-		s.confirmedSets.Load(),
-		elapsed)
+		fmtBytes(verified), fmtBytes(skipped), fmtBytes(s.totalCandidateBytes),
+		pct, s.confirmedCandidates.Load(), fmtBytes(s.confirmedBytes.Load()), s.confirmedSets.Load(), elapsed)
 }
 
 // Verifier confirms duplicates among candidate groups using progressive hashing.
@@ -165,6 +170,7 @@ type Verifier struct {
 	workers      int                   // Max concurrent file reads
 	showProgress bool                  // Whether to display progress bar
 	errCh        chan error            // Non-fatal errors (permission denied, etc.)
+	cache        *cache.Cache      // Optional hash cache (nil = disabled)
 
 	// Runtime (initialized in Run)
 	jobCh     chan job                  // Jobs to process
@@ -177,12 +183,14 @@ type Verifier struct {
 }
 
 // New creates a Verifier for confirming duplicates among candidate groups.
-func New(groups types.CandidateGroups, workers int, showProgress bool, errCh chan error) *Verifier {
+// Pass nil for cache to disable caching.
+func New(groups types.CandidateGroups, workers int, showProgress bool, errCh chan error, hashCache *cache.Cache) *Verifier {
 	return &Verifier{
 		groups:       groups,
 		workers:      workers,
 		showProgress: showProgress,
 		errCh:        errCh,
+		cache:        hashCache,
 	}
 }
 
@@ -291,11 +299,25 @@ func (v *Verifier) verifyFilesInJob(j job) map[string][]types.SiblingGroup {
 			// Hash only the first file - all siblings are hardlinks with identical content
 			rep := sibs.First()
 			start, size := calcRange(j.stage, j.offset, rep.Size)
+
+			// Try cache first
+			if cachedHash := v.cache.Lookup(rep, start, size); cachedHash != nil {
+				v.stats.cachedBytes.Add(uint64(size))
+				v.bar.Describe(v.stats)
+				results <- hashResult{hex.EncodeToString(cachedHash), sibs}
+				return
+			}
+
+			// Cache miss - compute hash
 			hash, bytesRead, err := hashRange(rep.Path, start, size)
 			if err != nil {
 				v.sendError(fmt.Errorf("%s: %w", rep.Path, err))
 				return
 			}
+
+			// Store in cache immediately (can't batch - hash values are GCed after grouping)
+			hashBytes, _ := hex.DecodeString(hash)
+			v.cache.Store(rep, start, size, hashBytes)
 
 			v.stats.verifiedBytes.Add(bytesRead)
 			v.bar.Describe(v.stats)

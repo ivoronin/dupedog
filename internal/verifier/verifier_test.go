@@ -8,8 +8,12 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/ivoronin/dupedog/internal/cache"
 	"github.com/ivoronin/dupedog/internal/types"
 )
+
+// noCache is a disabled cache for tests (cache.Open("") returns no-op cache).
+var noCache, _ = cache.Open("")
 
 // =============================================================================
 // Section 5.1: Core Verifier Tests
@@ -201,7 +205,7 @@ func TestVerifierSmallFiles(t *testing.T) {
 		}),
 	})
 
-	v := New(groups, 2, false, nil)
+	v := New(groups, 2, false, nil, noCache)
 	duplicates := v.Run()
 
 	if duplicates.Len() != 1 {
@@ -246,7 +250,7 @@ func TestVerifierDifferentContent(t *testing.T) {
 		}),
 	})
 
-	v := New(groups, 2, false, nil)
+	v := New(groups, 2, false, nil, noCache)
 	duplicates := v.Run()
 
 	if duplicates.Len() != 0 {
@@ -277,7 +281,7 @@ func TestVerifierEmptyFiles(t *testing.T) {
 		}),
 	})
 
-	v := New(groups, 2, false, nil)
+	v := New(groups, 2, false, nil, noCache)
 	duplicates := v.Run()
 
 	// Empty files should be considered duplicates (same content: nothing)
@@ -315,7 +319,7 @@ func TestVerifierExactlyProbeSize(t *testing.T) {
 		}),
 	})
 
-	v := New(groups, 2, false, nil)
+	v := New(groups, 2, false, nil, noCache)
 	duplicates := v.Run()
 
 	if duplicates.Len() != 1 {
@@ -358,7 +362,7 @@ func TestVerifierSiblingGroupOptimization(t *testing.T) {
 		}),
 	})
 
-	v := New(groups, 2, false, nil)
+	v := New(groups, 2, false, nil, noCache)
 	duplicates := v.Run()
 
 	if duplicates.Len() != 1 {
@@ -388,7 +392,7 @@ func TestVerifierSiblingGroupOptimization(t *testing.T) {
 
 // TestVerifierEmptyInput tests behavior with no candidate groups.
 func TestVerifierEmptyInput(t *testing.T) {
-	v := New(types.NewCandidateGroups(nil), 2, false, nil)
+	v := New(types.NewCandidateGroups(nil), 2, false, nil, noCache)
 	duplicates := v.Run()
 
 	if duplicates.Len() != 0 {
@@ -427,7 +431,7 @@ func TestVerifierUnreadableFile(t *testing.T) {
 		}),
 	})
 
-	v := New(groups, 2, false, errCh)
+	v := New(groups, 2, false, errCh, noCache)
 	duplicates := v.Run()
 	close(errCh)
 
@@ -477,7 +481,7 @@ func TestVerifierFileDeleted(t *testing.T) {
 		}),
 	})
 
-	v := New(groups, 2, false, errCh)
+	v := New(groups, 2, false, errCh, noCache)
 	duplicates := v.Run()
 	close(errCh)
 
@@ -544,7 +548,7 @@ func TestVerifierMultipleCandidateGroups(t *testing.T) {
 		}),
 	})
 
-	v := New(groups, 2, false, nil)
+	v := New(groups, 2, false, nil, noCache)
 	duplicates := v.Run()
 
 	if duplicates.Len() != 2 {
