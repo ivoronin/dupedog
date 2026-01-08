@@ -102,7 +102,7 @@ func reapPath(rootPath, logicalPath string) (ReapVolume, error) {
 		}
 
 		inode := stat.Ino
-		nlink := uint64(stat.Nlink)
+		nlink := uint64(stat.Nlink) //nolint:unconvert // platform-dependent type
 
 		// Group by inode (hardlinks)
 		if existing, ok := inodeToFile[inode]; ok {

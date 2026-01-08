@@ -779,7 +779,7 @@ func getFileInfo(t *testing.T, path string) *types.FileInfo {
 		Path:    path,
 		Size:    info.Size(),
 		ModTime: info.ModTime(),
-		Dev:     uint64(stat.Dev),
+		Dev:     uint64(stat.Dev), //nolint:unconvert // platform-dependent type
 		Ino:     stat.Ino,
 		Nlink:   uint32(stat.Nlink),
 	}
