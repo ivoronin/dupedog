@@ -1,6 +1,7 @@
 package testfs
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -79,13 +80,8 @@ func sowFile(volPath string, f File) error {
 		return nil
 	}
 
-	content, err := generateChunkedContent(f.Chunks)
-	if err != nil {
-		return fmt.Errorf("generate content: %w", err)
-	}
-
 	firstPath := filepath.Join(volPath, f.Path[0])
-	if err := createFile(firstPath, content); err != nil {
+	if err := writeChunkedFile(firstPath, f.Chunks); err != nil {
 		return fmt.Errorf("create %s: %w", firstPath, err)
 	}
 
@@ -94,6 +90,63 @@ func sowFile(volPath string, f File) error {
 		if err := createHardlink(firstPath, linkPath); err != nil {
 			return fmt.Errorf("hardlink %s -> %s: %w", linkPath, firstPath, err)
 		}
+	}
+	return nil
+}
+
+// writeChunkedFile streams content directly to disk.
+// Efficiently handles both tiny (100B) and huge (1GiB) chunks.
+func writeChunkedFile(path string, chunks []Chunk) (err error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+	}()
+
+	for _, c := range chunks {
+		if err := writeChunk(f, c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeChunk writes a single chunk to the file using streaming.
+func writeChunk(f *os.File, c Chunk) error {
+	const maxBufSize = 1 << 20 // 1MiB max buffer
+
+	size, err := humanize.ParseBytes(c.Size)
+	if err != nil {
+		return fmt.Errorf("parse chunk size %q: %w", c.Size, err)
+	}
+
+	// Use smaller buffer for small chunks
+	bufSize := int(size)
+	if bufSize > maxBufSize {
+		bufSize = maxBufSize
+	}
+
+	// Create pattern-filled buffer
+	buf := bytes.Repeat([]byte{byte(c.Pattern)}, bufSize)
+
+	// Stream write
+	remaining := int64(size)
+	for remaining > 0 {
+		toWrite := int64(len(buf))
+		if remaining < toWrite {
+			toWrite = remaining
+		}
+		if _, err := f.Write(buf[:toWrite]); err != nil {
+			return err
+		}
+		remaining -= toWrite
 	}
 	return nil
 }
@@ -112,46 +165,6 @@ func sowSymlinks(volPath string, symlinks []Symlink) error {
 // -----------------------------------------------------------------------------
 // Helper Functions
 // -----------------------------------------------------------------------------
-
-// generateChunkedContent creates file content from a chunks specification.
-// Each chunk fills its size with the pattern byte.
-// Same chunks = same content = duplicates detected.
-func generateChunkedContent(chunks []Chunk) ([]byte, error) {
-	// Calculate total size
-	var totalSize int64
-	for _, c := range chunks {
-		size, err := humanize.ParseBytes(c.Size)
-		if err != nil {
-			return nil, fmt.Errorf("parse chunk size %q: %w", c.Size, err)
-		}
-		totalSize += int64(size)
-	}
-
-	// Allocate and fill content
-	content := make([]byte, totalSize)
-	offset := int64(0)
-
-	for _, c := range chunks {
-		size, _ := humanize.ParseBytes(c.Size) // Already validated above
-		pattern := byte(c.Pattern)
-
-		// Fill this chunk region with the pattern byte
-		for i := int64(0); i < int64(size); i++ {
-			content[offset+i] = pattern
-		}
-		offset += int64(size)
-	}
-
-	return content, nil
-}
-
-// createFile creates a file with the given content, creating parent dirs.
-func createFile(path string, content []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(path, content, 0o644)
-}
 
 // createHardlink creates a hardlink, creating parent dirs.
 func createHardlink(target, link string) error {
