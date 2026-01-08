@@ -1,0 +1,34 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - govet
+    - errcheck
+    - staticcheck
+    - ineffassign
+    - unused
+    - misspell
+    - gocyclo
+    - gocognit
+    - unconvert
+    - gocritic
+  settings:
+    misspell:
+      ignore-rules:
+        - hardlinked
+    gocyclo:
+      min-complexity: 10
+    gocognit:
+      min-complexity: 20
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+        - style
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

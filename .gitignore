@@ -1,0 +1,25 @@
+# Binaries
+/dupedog*
+*.exe
+dist/
+
+# Test artifacts
+coverage.out
+coverage.html
+*.test
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.claude
+/openspec
+.zed
+
+# Build
+.goreleaser/
+.build/
+
+# OS
+.DS_Store
