@@ -1,5 +1,11 @@
 # dupedog
 
+[![Build](https://img.shields.io/github/actions/workflow/status/ivoronin/dupedog/release.yml?style=flat-square)](https://github.com/ivoronin/dupedog/actions)
+[![Version](https://img.shields.io/github/v/release/ivoronin/dupedog?style=flat-square)](https://github.com/ivoronin/dupedog/releases)
+[![Docker](https://img.shields.io/badge/docker-ghcr.io-blue?style=flat-square&logo=docker)](https://github.com/ivoronin/dupedog/pkgs/container/dupedog)
+[![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
+[![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macos-brightgreen?style=flat-square)](#installation)
+
 A high-performance duplicate file finder and deduplicator for Unix systems. Reclaims disk space by replacing duplicate files with hardlinks (or symlinks for cross-device scenarios).
 
 ```
