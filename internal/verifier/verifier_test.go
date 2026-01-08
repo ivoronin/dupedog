@@ -19,99 +19,94 @@ var noCache, _ = cache.Open("")
 // Section 5.1: Core Verifier Tests
 // =============================================================================
 
-// TestInitialStage tests the initial stage selection based on file size.
-func TestInitialStage(t *testing.T) {
-	tests := []struct {
-		name     string
-		fileSize int64
-		want     stage
-	}{
-		{"small file", probeSize - 1, stageChunk},
-		{"exactly probeSize", probeSize, stageHead},
-		{"large file", probeSize + 1, stageHead},
-		{"zero bytes", 0, stageChunk},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := initialStage(tt.fileSize)
-			if got != tt.want {
-				t.Errorf("initialStage(%d) = %v, want %v", tt.fileSize, got, tt.want)
-			}
-		})
-	}
-}
-
-// TestCalcRange tests byte range calculation for different stages.
-func TestCalcRange(t *testing.T) {
+// TestNextJobInitial tests the initial job creation based on file size (prev=nil).
+func TestNextJobInitial(t *testing.T) {
 	tests := []struct {
 		name      string
-		stage     stage
-		offset    int64
 		fileSize  int64
 		wantStart int64
 		wantSize  int64
 	}{
-		// HEAD stage
-		{"head large file", stageHead, 0, 10 * probeSize, 0, probeSize},
-		{"head small file", stageHead, 0, probeSize / 2, 0, probeSize / 2},
-		{"head exact probeSize", stageHead, 0, probeSize, 0, probeSize},
-
-		// TAIL stage
-		{"tail large file", stageTail, 0, 10 * probeSize, 9 * probeSize, probeSize},
-		{"tail small file", stageTail, 0, probeSize / 2, 0, probeSize / 2},
-		{"tail exact probeSize", stageTail, 0, probeSize, 0, probeSize},
-		{"tail 2MB file", stageTail, 0, 2 * probeSize, probeSize, probeSize},
-
-		// CHUNK stage
-		{"chunk first", stageChunk, 0, 2 * chunkSize, 0, chunkSize},
-		{"chunk second", stageChunk, chunkSize, 2 * chunkSize, chunkSize, chunkSize},
-		{"chunk partial", stageChunk, chunkSize, chunkSize + 100, chunkSize, 100},
-		{"chunk small file", stageChunk, 0, 100, 0, 100},
+		{"small file", 100, 0, 100},                      // Read entire small file
+		{"exactly probeSize-1", probeSize - 1, 0, probeSize - 1},
+		{"exactly probeSize", probeSize, 0, probeSize},   // HEAD probe
+		{"large file", probeSize + 1, 0, probeSize},      // HEAD probe
+		{"zero bytes", 0, 0, 0},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			start, size := calcRange(tt.stage, tt.offset, tt.fileSize)
-			if start != tt.wantStart || size != tt.wantSize {
-				t.Errorf("calcRange(%v, %d, %d) = (%d, %d), want (%d, %d)",
-					tt.stage, tt.offset, tt.fileSize, start, size, tt.wantStart, tt.wantSize)
+			group := types.NewCandidateGroup([]types.SiblingGroup{
+				types.NewSiblingGroup([]*types.FileInfo{{Path: "test", Size: tt.fileSize}}),
+			})
+			j, done := nextJob(nil, group)
+			if done {
+				t.Errorf("nextJob(nil, fileSize=%d) done=true, want false", tt.fileSize)
+			}
+			if j.start != tt.wantStart || j.size != tt.wantSize {
+				t.Errorf("nextJob(nil, fileSize=%d) = {start: %d, size: %d}, want {start: %d, size: %d}",
+					tt.fileSize, j.start, j.size, tt.wantStart, tt.wantSize)
+			}
+			// totalBytes should equal size for initial job
+			if j.totalBytes != tt.wantSize {
+				t.Errorf("nextJob(nil, fileSize=%d) totalBytes = %d, want %d", tt.fileSize, j.totalBytes, tt.wantSize)
 			}
 		})
 	}
 }
 
-// TestNextJob tests stage progression logic.
-func TestNextJob(t *testing.T) {
+// TestNextJobProgression tests the state machine for range progression.
+func TestNextJobProgression(t *testing.T) {
 	smallFile := types.NewCandidateGroup([]types.SiblingGroup{
 		types.NewSiblingGroup([]*types.FileInfo{{Path: "a", Size: 100}}),
 	})
+	mediumFile := types.NewCandidateGroup([]types.SiblingGroup{
+		types.NewSiblingGroup([]*types.FileInfo{{Path: "b", Size: 2 * probeSize}}),
+	})
 	largeFile := types.NewCandidateGroup([]types.SiblingGroup{
-		types.NewSiblingGroup([]*types.FileInfo{{Path: "b", Size: 2 * chunkSize}}),
+		types.NewSiblingGroup([]*types.FileInfo{{Path: "c", Size: 2*chunkSize + 2*probeSize}}),
 	})
 
+	largeFileSize := int64(2*chunkSize + 2*probeSize)
+	tailStart := largeFileSize - probeSize
+
 	tests := []struct {
-		name      string
-		parent    job
-		group     types.CandidateGroup
-		wantStage stage
-		wantDone  bool
+		name           string
+		prev           job
+		group          types.CandidateGroup
+		wantStart      int64
+		wantSize       int64
+		wantTotalBytes int64
+		wantDone       bool
 	}{
-		{"head to tail", job{stage: stageHead}, smallFile, stageTail, false},
-		{"tail to chunk", job{stage: stageTail}, smallFile, stageChunk, false},
-		{"chunk done (small)", job{stage: stageChunk, offset: 0}, smallFile, 0, true},
-		{"chunk continues (large)", job{stage: stageChunk, offset: 0}, largeFile, stageChunk, false},
-		{"chunk done (large)", job{stage: stageChunk, offset: 2 * chunkSize}, largeFile, 0, true},
+		// Small files (< probeSize): single read, done
+		{"small file done", job{start: 0, size: 100, totalBytes: 100}, smallFile, 0, 0, 0, true},
+
+		// Medium files (probeSize < size <= 2*probeSize): HEAD → remaining → done (no overlap!)
+		{"medium HEAD to remaining", job{start: 0, size: probeSize, totalBytes: probeSize}, mediumFile, probeSize, probeSize, 2 * probeSize, false},
+		{"medium remaining done", job{start: probeSize, size: probeSize, totalBytes: 2 * probeSize}, mediumFile, 0, 0, 0, true},
+
+		// Large files (> 2*probeSize): HEAD → TAIL → CHUNK[probeSize] → ... → done
+		{"large HEAD to TAIL", job{start: 0, size: probeSize, totalBytes: probeSize}, largeFile, tailStart, probeSize, 2 * probeSize, false},
+		{"large TAIL to chunk", job{start: tailStart, size: probeSize, totalBytes: 2 * probeSize}, largeFile, probeSize, chunkSize, 2*probeSize + chunkSize, false},
+		{"large chunk continues", job{start: probeSize, size: chunkSize, totalBytes: 2*probeSize + chunkSize}, largeFile, probeSize + chunkSize, chunkSize, 2*probeSize + 2*chunkSize, false},
+		{"large chunk done", job{start: probeSize + chunkSize, size: chunkSize, totalBytes: 2*probeSize + 2*chunkSize}, largeFile, 0, 0, 0, true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			next, done := nextJob(tt.parent, tt.group)
+			next, done := nextJob(&tt.prev, tt.group)
 			if done != tt.wantDone {
 				t.Errorf("nextJob() done = %v, want %v", done, tt.wantDone)
 			}
-			if !done && next.stage != tt.wantStage {
-				t.Errorf("nextJob() stage = %v, want %v", next.stage, tt.wantStage)
+			if !done {
+				if next.start != tt.wantStart || next.size != tt.wantSize {
+					t.Errorf("nextJob() = (start=%d, size=%d), want (start=%d, size=%d)",
+						next.start, next.size, tt.wantStart, tt.wantSize)
+				}
+				if next.totalBytes != tt.wantTotalBytes {
+					t.Errorf("nextJob() totalBytes = %d, want %d", next.totalBytes, tt.wantTotalBytes)
+				}
 			}
 		})
 	}
@@ -128,13 +123,13 @@ func TestHashRange(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	hash, bytesRead, err := hashRange(path, 0, int64(len(content)))
+	hash, n, err := hashRange(path, 0, int64(len(content)))
 	if err != nil {
 		t.Fatalf("hashRange failed: %v", err)
 	}
 
-	if bytesRead != uint64(len(content)) {
-		t.Errorf("bytesRead = %d, want %d", bytesRead, len(content))
+	if n != int64(len(content)) {
+		t.Errorf("n = %d, want %d", n, len(content))
 	}
 
 	// SHA256 of "hello world" is known
@@ -155,13 +150,13 @@ func TestHashRangePartial(t *testing.T) {
 	}
 
 	// Hash only "hello"
-	hash, bytesRead, err := hashRange(path, 0, 5)
+	hash, n, err := hashRange(path, 0, 5)
 	if err != nil {
 		t.Fatalf("hashRange failed: %v", err)
 	}
 
-	if bytesRead != 5 {
-		t.Errorf("bytesRead = %d, want 5", bytesRead)
+	if n != 5 {
+		t.Errorf("n = %d, want 5", n)
 	}
 
 	// SHA256 of "hello"
