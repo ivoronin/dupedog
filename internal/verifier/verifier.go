@@ -177,7 +177,7 @@ type Verifier struct {
 }
 
 // New creates a Verifier for confirming duplicates among candidate groups.
-// Pass nil for cache to disable caching.
+// Use cache.Open("") for disabled cache; nil will panic.
 func New(groups types.CandidateGroups, workers int, showProgress bool, errCh chan error, hashCache *cache.Cache) *Verifier {
 	return &Verifier{
 		groups:       groups,
@@ -295,7 +295,12 @@ func (v *Verifier) verifyFilesInJob(j job) map[string][]types.SiblingGroup {
 			rep := sibs.First()
 
 			// Try cache first
-			if cachedHash := v.cache.Lookup(rep, j.start, j.size); cachedHash != nil {
+			cachedHash, err := v.cache.Lookup(rep, j.start, j.size)
+			if err != nil {
+				v.sendError(fmt.Errorf("cache lookup %s: %w", rep.Path, err))
+				// Continue with hash computation on cache error
+			}
+			if cachedHash != nil {
 				v.stats.cachedBytes.Add(uint64(j.size))
 				v.bar.Describe(v.stats)
 				results <- hashResult{hex.EncodeToString(cachedHash), sibs}
@@ -310,7 +315,9 @@ func (v *Verifier) verifyFilesInJob(j job) map[string][]types.SiblingGroup {
 			}
 
 			hashBytes, _ := hex.DecodeString(hash)
-			v.cache.Store(rep, j.start, j.size, hashBytes)
+			if err := v.cache.Store(rep, j.start, j.size, hashBytes); err != nil {
+				v.sendError(fmt.Errorf("cache store %s: %w", rep.Path, err))
+			}
 			v.stats.verifiedBytes.Add(uint64(n))
 			v.bar.Describe(v.stats)
 

@@ -21,10 +21,13 @@ func TestCacheDisabled(t *testing.T) {
 	hash := []byte("12345678901234567890123456789012") // 32 bytes
 
 	// Store should be no-op when disabled
-	c.Store(fi, 0, 100, hash)
+	_ = c.Store(fi, 0, 100, hash)
 
 	// Lookup should return nil when disabled
-	result := c.Lookup(fi, 0, 100)
+	result, err := c.Lookup(fi, 0, 100)
+	if err != nil {
+		t.Errorf("Lookup() on disabled cache returned error: %v", err)
+	}
 	if result != nil {
 		t.Errorf("Lookup() on disabled cache returned %v, want nil", result)
 	}
@@ -49,10 +52,10 @@ func TestCacheRoundTrip(t *testing.T) {
 	hash := []byte("abcdefghijklmnopqrstuvwxyz012345") // 32 bytes
 
 	// Store various byte ranges
-	c1.Store(fi, 0, 1024, hash)            // full file
-	c1.Store(fi, 0, 512, hash)             // first half
-	c1.Store(fi, 512, 512, hash)           // second half
-	c1.Store(fi, 1<<30, 1<<30, hash)       // 1GB chunk at 1GB offset
+	_ = c1.Store(fi, 0, 1024, hash)      // full file
+	_ = c1.Store(fi, 0, 512, hash)       // first half
+	_ = c1.Store(fi, 512, 512, hash)     // second half
+	_ = c1.Store(fi, 1<<30, 1<<30, hash) // 1GB chunk at 1GB offset
 
 	if err := c1.Close(); err != nil {
 		t.Fatalf("Close() failed: %v", err)
@@ -75,7 +78,11 @@ func TestCacheRoundTrip(t *testing.T) {
 		{512, 512},
 		{1 << 30, 1 << 30},
 	} {
-		result := c2.Lookup(fi, tc.start, tc.size)
+		result, err := c2.Lookup(fi, tc.start, tc.size)
+		if err != nil {
+			t.Errorf("Lookup(start=%d, size=%d) returned error: %v", tc.start, tc.size, err)
+			continue
+		}
 		if result == nil {
 			t.Errorf("Lookup(start=%d, size=%d) returned nil, want hash", tc.start, tc.size)
 			continue
@@ -99,7 +106,7 @@ func TestCacheMissOnMtimeChange(t *testing.T) {
 		ModTime: time.Unix(1609459200, 0),
 	}
 	hash := []byte("abcdefghijklmnopqrstuvwxyz012345")
-	c1.Store(fi, 0, 1024, hash)
+	_ = c1.Store(fi, 0, 1024, hash)
 	_ = c1.Close()
 
 	// Lookup with different mtime
@@ -113,7 +120,7 @@ func TestCacheMissOnMtimeChange(t *testing.T) {
 		ModTime: time.Unix(1609459201, 0), // 1 second later
 	}
 
-	result := c2.Lookup(fiModified, 0, 1024)
+	result, _ := c2.Lookup(fiModified, 0, 1024)
 	if result != nil {
 		t.Errorf("Lookup() with different mtime returned %v, want nil", result)
 	}
@@ -126,14 +133,14 @@ func TestCacheMissOnSizeChange(t *testing.T) {
 	c1, _ := Open(cachePath)
 	fi := &types.FileInfo{Path: "/test/file.txt", Size: 1024, Ino: 12345, ModTime: time.Now()}
 	hash := []byte("abcdefghijklmnopqrstuvwxyz012345")
-	c1.Store(fi, 0, 1024, hash)
+	_ = c1.Store(fi, 0, 1024, hash)
 	_ = c1.Close()
 
 	c2, _ := Open(cachePath)
 	defer func() { _ = c2.Close() }()
 
 	fiDifferentSize := &types.FileInfo{Path: fi.Path, Size: 2048, Ino: fi.Ino, ModTime: fi.ModTime}
-	result := c2.Lookup(fiDifferentSize, 0, 1024)
+	result, _ := c2.Lookup(fiDifferentSize, 0, 1024)
 	if result != nil {
 		t.Errorf("Lookup() with different file size returned %v, want nil", result)
 	}
@@ -146,7 +153,7 @@ func TestCacheMissOnInodeChange(t *testing.T) {
 	c1, _ := Open(cachePath)
 	fi := &types.FileInfo{Path: "/test/file.txt", Size: 1024, Ino: 12345, ModTime: time.Now()}
 	hash := []byte("abcdefghijklmnopqrstuvwxyz012345")
-	c1.Store(fi, 0, 1024, hash)
+	_ = c1.Store(fi, 0, 1024, hash)
 	_ = c1.Close()
 
 	c2, _ := Open(cachePath)
@@ -154,7 +161,7 @@ func TestCacheMissOnInodeChange(t *testing.T) {
 
 	// Simulates: file deleted, new file created with same path (different inode)
 	fiDifferentIno := &types.FileInfo{Path: fi.Path, Size: fi.Size, Ino: 99999, ModTime: fi.ModTime}
-	result := c2.Lookup(fiDifferentIno, 0, 1024)
+	result, _ := c2.Lookup(fiDifferentIno, 0, 1024)
 	if result != nil {
 		t.Errorf("Lookup() with different inode returned %v, want nil", result)
 	}
@@ -167,14 +174,14 @@ func TestCacheMissOnPathChange(t *testing.T) {
 	c1, _ := Open(cachePath)
 	fi := &types.FileInfo{Path: "/test/original.txt", Size: 1024, Ino: 12345, ModTime: time.Now()}
 	hash := []byte("abcdefghijklmnopqrstuvwxyz012345")
-	c1.Store(fi, 0, 1024, hash)
+	_ = c1.Store(fi, 0, 1024, hash)
 	_ = c1.Close()
 
 	c2, _ := Open(cachePath)
 	defer func() { _ = c2.Close() }()
 
 	fiDifferentPath := &types.FileInfo{Path: "/test/renamed.txt", Size: fi.Size, Ino: fi.Ino, ModTime: fi.ModTime}
-	result := c2.Lookup(fiDifferentPath, 0, 1024)
+	result, _ := c2.Lookup(fiDifferentPath, 0, 1024)
 	if result != nil {
 		t.Errorf("Lookup() with different path returned %v, want nil", result)
 	}
@@ -187,14 +194,14 @@ func TestCacheMissOnStartChange(t *testing.T) {
 	c1, _ := Open(cachePath)
 	fi := &types.FileInfo{Path: "/test/file.txt", Size: 1024, Ino: 12345, ModTime: time.Now()}
 	hash := []byte("abcdefghijklmnopqrstuvwxyz012345")
-	c1.Store(fi, 0, 512, hash) // Store first 512 bytes
+	_ = c1.Store(fi, 0, 512, hash) // Store first 512 bytes
 	_ = c1.Close()
 
 	c2, _ := Open(cachePath)
 	defer func() { _ = c2.Close() }()
 
 	// Lookup with different start offset - should miss
-	result := c2.Lookup(fi, 512, 512)
+	result, _ := c2.Lookup(fi, 512, 512)
 	if result != nil {
 		t.Errorf("Lookup() with different start returned %v, want nil", result)
 	}
@@ -207,14 +214,14 @@ func TestCacheMissOnRangeSizeChange(t *testing.T) {
 	c1, _ := Open(cachePath)
 	fi := &types.FileInfo{Path: "/test/file.txt", Size: 1024, Ino: 12345, ModTime: time.Now()}
 	hash := []byte("abcdefghijklmnopqrstuvwxyz012345")
-	c1.Store(fi, 0, 512, hash) // Store range [0, 512)
+	_ = c1.Store(fi, 0, 512, hash) // Store range [0, 512)
 	_ = c1.Close()
 
 	c2, _ := Open(cachePath)
 	defer func() { _ = c2.Close() }()
 
 	// Lookup with same start but different size - should miss
-	result := c2.Lookup(fi, 0, 1024)
+	result, _ := c2.Lookup(fi, 0, 1024)
 	if result != nil {
 		t.Errorf("Lookup() with different range size returned %v, want nil", result)
 	}
@@ -229,13 +236,13 @@ func TestSelfCleaning(t *testing.T) {
 	fiA := &types.FileInfo{Path: "/a.txt", Size: 100, Ino: 1, ModTime: time.Now()}
 	fiB := &types.FileInfo{Path: "/b.txt", Size: 200, Ino: 2, ModTime: time.Now()}
 	hash := []byte("abcdefghijklmnopqrstuvwxyz012345")
-	c1.Store(fiA, 0, 100, hash)
-	c1.Store(fiB, 0, 200, hash)
+	_ = c1.Store(fiA, 0, 100, hash)
+	_ = c1.Store(fiB, 0, 200, hash)
 	_ = c1.Close()
 
 	// Second run: only lookup fiA (fiB becomes orphan)
 	c2, _ := Open(cachePath)
-	c2.Lookup(fiA, 0, 100) // Hit - will be copied to new DB
+	_, _ = c2.Lookup(fiA, 0, 100) // Hit - will be copied to new DB
 	// fiB is NOT looked up
 	_ = c2.Close()
 
@@ -244,12 +251,14 @@ func TestSelfCleaning(t *testing.T) {
 	defer func() { _ = c3.Close() }()
 
 	// fiA should still exist
-	if c3.Lookup(fiA, 0, 100) == nil {
+	resultA, _ := c3.Lookup(fiA, 0, 100)
+	if resultA == nil {
 		t.Error("fiA should exist after self-cleaning")
 	}
 
 	// fiB should be gone (not looked up in run 2)
-	if c3.Lookup(fiB, 0, 200) != nil {
+	resultB, _ := c3.Lookup(fiB, 0, 200)
+	if resultB != nil {
 		t.Error("fiB should have been cleaned")
 	}
 }
@@ -264,10 +273,10 @@ func TestInvalidHashSize(t *testing.T) {
 	fi := &types.FileInfo{Path: "/test.txt", Size: 100, Ino: 1, ModTime: time.Now()}
 
 	// Store with wrong hash size - should be ignored
-	c.Store(fi, 0, 100, []byte("too short"))
+	_ = c.Store(fi, 0, 100, []byte("too short"))
 
 	// Lookup should return nil
-	result := c.Lookup(fi, 0, 100)
+	result, _ := c.Lookup(fi, 0, 100)
 	if result != nil {
 		t.Errorf("Lookup() after invalid Store returned %v, want nil", result)
 	}

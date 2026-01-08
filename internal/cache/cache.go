@@ -76,6 +76,7 @@ func Open(path string) (*Cache, error) {
 }
 
 // Close closes both databases and atomically replaces old with new.
+// Only replaces if write database closed successfully to avoid data loss.
 func (c *Cache) Close() error {
 	var errs []error
 	if c.readDB != nil {
@@ -86,10 +87,11 @@ func (c *Cache) Close() error {
 	if c.writeDB != nil {
 		if err := c.writeDB.Close(); err != nil {
 			errs = append(errs, err)
-		}
-		// Atomic replace: rename new → old
-		if err := os.Rename(c.path+".new", c.path); err != nil {
-			errs = append(errs, err)
+		} else {
+			// Atomic replace: rename new → old (only if close succeeded)
+			if err := os.Rename(c.path+".new", c.path); err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
 	if len(errs) > 0 {
@@ -118,16 +120,16 @@ func makeKey(fi *types.FileInfo, start, size int64) []byte {
 // Lookup retrieves a cached hash for a byte range.
 // Key = (path, fileSize, ino, mtime, start, size) - any change = cache miss.
 // On HIT: copies entry to writeDB (self-cleaning).
-// Returns nil if not found.
-func (c *Cache) Lookup(fi *types.FileInfo, start, size int64) []byte {
+// Returns (nil, nil) if not found, (nil, err) on read error.
+func (c *Cache) Lookup(fi *types.FileInfo, start, size int64) ([]byte, error) {
 	if !c.enabled || c.readDB == nil {
-		return nil
+		return nil, nil
 	}
 
 	key := makeKey(fi, start, size)
 	var hash []byte
 
-	_ = c.readDB.View(func(tx *bolt.Tx) error {
+	err := c.readDB.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(bucketName))
 		if b == nil {
 			return nil
@@ -139,25 +141,32 @@ func (c *Cache) Lookup(fi *types.FileInfo, start, size int64) []byte {
 		}
 		return nil
 	})
+	if err != nil {
+		return nil, fmt.Errorf("cache lookup: %w", err)
+	}
 
 	if hash == nil {
-		return nil
+		return nil, nil
 	}
 
 	// Self-cleaning: copy valid entry to new database
-	c.Store(fi, start, size, hash)
+	_ = c.Store(fi, start, size, hash)
 
-	return hash
+	return hash, nil
 }
 
 // Store saves a hash for a byte range to the new database.
-func (c *Cache) Store(fi *types.FileInfo, start, size int64, hash []byte) {
+func (c *Cache) Store(fi *types.FileInfo, start, size int64, hash []byte) error {
 	if !c.enabled || c.writeDB == nil || len(hash) != hashSize {
-		return
+		return nil
 	}
 
-	_ = c.writeDB.Update(func(tx *bolt.Tx) error {
+	err := c.writeDB.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(bucketName))
 		return b.Put(makeKey(fi, start, size), hash)
 	})
+	if err != nil {
+		return fmt.Errorf("cache store: %w", err)
+	}
+	return nil
 }
