@@ -1,4 +1,4 @@
-.PHONY: build build-linux-amd64 test test-e2e test-all lint clean
+.PHONY: build build-linux-amd64 test test-e2e test-all lint release clean
 
 # Use Docker host from current context for e2e tests
 E2E_ENV = DOCKER_HOST=$(shell docker context inspect --format '{{.Endpoints.docker.Host}}')
@@ -20,8 +20,11 @@ test:
 test-e2e: build-e2e
 	DUPEDOG_E2E_BINDIR=$(CURDIR)/.build/e2e $(E2E_ENV) go test -tags=e2e -v ./internal/...
 
-test-all: build-e2e
+test-all: lint build-e2e
 	DUPEDOG_E2E_BINDIR=$(CURDIR)/.build/e2e $(E2E_ENV) go test -tags=e2e ./...
+
+release:
+	goreleaser release --clean
 
 test-cover:
 	go test -coverprofile=coverage.out ./...
