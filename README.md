@@ -1,28 +1,32 @@
 # dupedog
 
-[![Build](https://img.shields.io/github/actions/workflow/status/ivoronin/dupedog/release.yml?style=flat-square)](https://github.com/ivoronin/dupedog/actions)
-[![Version](https://img.shields.io/github/v/release/ivoronin/dupedog?style=flat-square)](https://github.com/ivoronin/dupedog/releases)
-[![Docker](https://img.shields.io/badge/docker-ghcr.io-blue?style=flat-square&logo=docker)](https://github.com/ivoronin/dupedog/pkgs/container/dupedog)
-[![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
-[![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macos-brightgreen?style=flat-square)](#installation)
+Reclaim disk space by replacing duplicate files with hardlinks
 
-A high-performance duplicate file finder and deduplicator for Unix systems. Reclaims disk space by replacing duplicate files with hardlinks (or symlinks for cross-device scenarios).
+[![CI](https://github.com/ivoronin/dupedog/actions/workflows/release.yml/badge.svg)](https://github.com/ivoronin/dupedog/actions/workflows/release.yml)
+[![Release](https://img.shields.io/github/v/release/ivoronin/dupedog)](https://github.com/ivoronin/dupedog/releases)
 
+[Overview](#overview) · [Features](#features) · [Installation](#installation) · [Usage](#usage) · [Configuration](#configuration) · [Requirements](#requirements) · [License](#license)
+
+```bash
+dupedog dedupe --dry-run /data --exclude .git --min-size 1G --verbose
+# Scanned 2643338 (18 TiB), matched 1099 files (14 TiB) in 290.9s
+# Selected 946 candidates (13 TiB) in 0.0s
+# Verified 8.0 TiB + skipped 5.1 TiB out of 13 TiB (100%), confirmed 416 duplicates (5.1 TiB) in 241 sets in 1h13m20.24s
+# Deduplicated 416/416 files in 241/241 sets (100%), saved 5.1 TiB in 1.9s
 ```
-$ dupedog dedupe --dry-run /data/ --exclude .git --min-size 1g --verbose
-✔ Scanned 2643338 (18 TiB), matched 1099 files (14 TiB) in 290.9s
-✔ Selected 946 candidates (13 TiB) in 0.0s
-✔ Verified 8.0 TiB + skipped 5.1 TiB out of 13 TiB (100%), confirmed 416 duplicates (5.1 TiB) in 241 sets in 1h13m20.24s
-✔ Deduplicated 416/416 files in 241/241 sets (100%), saved 5.1 TiB in 1.9s
-```
+
+## Overview
+
+dupedog scans directories for duplicate files and replaces them with hardlinks, preserving disk space while maintaining file accessibility at all original paths. Files are identified as duplicates through SHA-256 content verification using a staged hashing strategy that minimizes disk I/O. For cross-device scenarios where hardlinks are not possible, symlink fallback is available.
 
 ## Features
 
-- **Parallel scanning** - concurrent directory traversal with configurable worker pool
-- **Progressive verification** - eliminates non-duplicates early using staged hashing
-- **Hash caching** - optional persistent cache skips re-hashing unchanged files across runs
-- **Atomic operations** - hardlink creation via temp file + rename pattern
-- **Cross-device support** - optional symlink fallback when hardlinks aren't possible
+- Parallel directory traversal with configurable worker pool (defaults to CPU count)
+- Progressive verification: hashes HEAD (1 MB) then TAIL (1 MB) then sequential 1 GB chunks, eliminating non-duplicates early
+- Optional hash caching via BoltDB, skipping re-hashing of unchanged files across runs
+- Atomic hardlink creation via temp file + rename pattern
+- Symlink fallback for cross-device deduplication
+- Path priority ordering: duplicates in later paths are replaced with links to files in earlier paths
 
 ## Installation
 
@@ -32,9 +36,9 @@ $ dupedog dedupe --dry-run /data/ --exclude .git --min-size 1g --verbose
 docker run --rm -v /data:/data ghcr.io/ivoronin/dupedog dedupe --dry-run /data
 ```
 
-### Binary releases
+### GitHub Releases
 
-Download pre-built binaries from [Releases](https://github.com/ivoronin/dupedog/releases).
+Download from [Releases](https://github.com/ivoronin/dupedog/releases).
 
 ### Homebrew
 
@@ -42,7 +46,7 @@ Download pre-built binaries from [Releases](https://github.com/ivoronin/dupedog/
 brew install ivoronin/ivoronin/dupedog
 ```
 
-### From source
+### From Source
 
 ```bash
 go install github.com/ivoronin/dupedog@latest
@@ -50,124 +54,78 @@ go install github.com/ivoronin/dupedog@latest
 
 ## Usage
 
+### Basic Deduplication
+
 ```bash
-dupedog dedupe [flags] <paths...>
+dupedog dedupe /data                          # Deduplicate files in /data
+dupedog dedupe --dry-run /data                # Preview changes without executing
+dupedog dedupe --min-size 1M /backup          # Only consider files >= 1 MB
 ```
 
-### Examples
+### Exclude Patterns
 
 ```bash
-# Preview deduplication
-dupedog dedupe --dry-run /data
+dupedog dedupe --exclude "*.tmp" /data        # Exclude files matching glob pattern
+dupedog dedupe --exclude ".git" /projects     # Exclude .git directories
+dupedog dedupe -e "*.log" -e "*.tmp" /data    # Multiple patterns (repeatable flag)
+```
 
-# Deduplicate with minimum size filter
-dupedog dedupe --min-size 1M /backup
+### Cross-Device Deduplication
 
-# File and subdirectory exclude patterns
-dupedog dedupe --exclude "*.tmp" --exclude ".git" /projects
-
-# Cross-device with symlink fallback
+```bash
 dupedog dedupe --symlink-fallback /volume1 /volume2
+```
 
-# Path priority: duplicates found in later paths are replaced with links to earlier paths
-dupedog dedupe --symlink-fallback /mnt/important /mnt/archive /mnt/copies
+When deduplicating across different filesystems, hardlinks are not possible. Use `--symlink-fallback` to create symlinks instead.
 
-# Enable hash caching for faster repeated runs
+### Path Priority
+
+```bash
+dupedog dedupe --symlink-fallback /mnt/primary /mnt/archive /mnt/copies
+```
+
+Path order determines which location keeps the actual data. Duplicates found in later paths are replaced with links pointing to files in earlier paths. In this example, files in `/mnt/primary` are preserved, while duplicates in `/mnt/archive` and `/mnt/copies` become links.
+
+### Hash Caching
+
+```bash
 dupedog dedupe --cache-file ~/.cache/dupedog_volume1.db /volume1
 ```
 
-### Flags
+With `--cache-file`, dupedog remembers file hashes between runs using BoltDB. Unchanged files are verified instantly from cache without disk I/O. Modified files are automatically re-hashed. Use separate cache files for different scan targets.
+
+### Flags Reference
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
 | `--min-size` | `-m` | `1` | Minimum file size (supports K, M, G suffixes) |
 | `--exclude` | `-e` | - | Glob patterns to exclude (repeatable) |
-| `--workers` | `-w` | `runtime.NumCPU()` | Parallel workers for scanning and hashing |
+| `--workers` | `-w` | CPU count | Parallel workers for scanning and hashing |
 | `--dry-run` | `-n` | `false` | Preview changes without executing |
 | `--verbose` | `-v` | `false` | Log individual file operations |
 | `--no-progress` | - | `false` | Disable progress bar |
 | `--cache-file` | - | - | Path to hash cache file (enables caching) |
 | `--symlink-fallback` | - | `false` | Use symlinks for cross-device deduplication |
-| `--trust-device-boundaries` | - | `false` | Assume devices have independent inode spaces (unsafe with NFS) |
+| `--trust-device-boundaries` | - | `false` | Assume devices have independent inode spaces |
 
-## How It Works
+### Device Boundaries
 
-### Pipeline Overview
+By default, dupedog groups files by inode number only, ignoring device ID. This is safe for NFS and network filesystems where the same file can appear with different device IDs depending on mount path.
 
-```
-SCAN → SCREEN → VERIFY → DEDUPE
-```
+With `--trust-device-boundaries`, files are grouped by (device, inode) pair. Use this when scanning multiple local disks with separate filesystems, USB drives, or VM disk images mounted separately.
 
-1. **Scan**: Parallel directory traversal, filtering by size and exclude patterns
-2. **Screen**: Group files by size, then by inode - only groups with 2+ unique inodes proceed
-3. **Verify**: Progressive content verification using SHA-256 (see below)
-4. **Dedupe**: Atomic replacement with hardlinks (or symlinks for cross-device)
+Do not use `--trust-device-boundaries` with NFS mounts or network storage where the same filesystem might appear as different devices.
 
-### Progressive Verification
+## Configuration
 
-The verification phase uses a staged hashing strategy to minimize I/O. Instead of reading entire files upfront, dupedog hashes files in stages:
+dupedog has no configuration file. All options are passed via command-line flags.
 
-1. **HEAD** - first 1 MB
-2. **TAIL** - last 1 MB
-3. **CHUNKS** - sequential 1 GB blocks (only if HEAD+TAIL match)
+## Requirements
 
-Files are eliminated as soon as their hash diverges from the group. In practice, most non-duplicates are eliminated after just 2 MB of I/O, because files that differ typically differ at the beginning or end.
-
-### Hash Caching
-
-With `--cache-file`, dupedog remembers file hashes between runs. Unchanged files are verified instantly from cache — no disk I/O needed.
-
-```
-# First run: 1h13m (all files hashed)
-✔ Verified 8.0 TiB + skipped 5.1 TiB out of 13 TiB (100%)
-
-# Second run: 2m (most files cached)
-✔ Verified 50 GiB + cached 7.95 TiB + skipped 5.1 TiB out of 13 TiB (100%)
-```
-
-Modified files are automatically re-hashed. Use separate cache files for different scan targets (each run keeps only entries it used).
-
-### Device Boundaries and Inode Grouping
-
-dupedog needs to identify which files are already hardlinked (pointing to the same inode) to avoid redundant hashing. This is controlled by `--trust-device-boundaries`:
-
-**Default behavior (`--trust-device-boundaries=false`):**
-
-Files are grouped by inode number only, ignoring device ID. This is safe for NFS and other network filesystems where the same physical file can appear with different device IDs depending on how it's mounted.
-
-```
-/mnt/nfs-a/file.txt  (dev=100, ino=12345)  ─┐
-/mnt/nfs-b/file.txt  (dev=200, ino=12345)  ─┴─► Same inode 12345 → treated as same file
-```
-
-**With `--trust-device-boundaries`:**
-
-Files are grouped by (device, inode) pair. This assumes each device has an independent inode namespace - inode 12345 on device A is unrelated to inode 12345 on device B.
-
-```
-/dev/sda1/file.txt   (dev=100, ino=12345)  ─► device 100, inode 12345
-/dev/sdb1/other.txt  (dev=200, ino=12345)  ─► device 200, inode 12345 (different file)
-```
-
-**When to use `--trust-device-boundaries`:**
-- Multiple local disks with separate filesystems
-- USB drives or external storage
-- Virtual machine disk images mounted separately
-
-**When NOT to use it (keep default):**
-- NFS mounts (same export mounted at multiple paths)
-- Network storage with multiple access paths
-- Any scenario where the same filesystem might appear as different devices
-
-## Development
-
-```bash
-make build       # Build binary
-make test        # Run unit tests
-make test-e2e    # Run E2E tests (requires Docker)
-make lint        # Run linter
-```
+- Linux or macOS
+- Go 1.25+ (for building from source)
+- Docker (for container usage or E2E tests)
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+[MIT](LICENSE)
