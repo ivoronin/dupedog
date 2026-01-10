@@ -46,12 +46,6 @@ Download from [Releases](https://github.com/ivoronin/dupedog/releases).
 brew install ivoronin/ivoronin/dupedog
 ```
 
-### From Source
-
-```bash
-go install github.com/ivoronin/dupedog@latest
-```
-
 ## Usage
 
 ### Basic Deduplication
