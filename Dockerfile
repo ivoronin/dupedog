@@ -10,6 +10,6 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" -o /dupedog ./cmd/dupedog
 
-FROM alpine:3.21
+FROM alpine:3.23
 COPY --from=builder /dupedog /usr/local/bin/dupedog
 ENTRYPOINT ["dupedog"]
